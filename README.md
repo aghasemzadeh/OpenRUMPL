@@ -96,7 +96,7 @@ We stand on the shoulders of giants! 🌍 Big thanks to the authors of these ama
 ## ⚖️ License & Copyright
 
 **Copyright © 2024 UCLouvain.**
-*Author: [Your Name]*
+*Author: Seyed Abolfazl Ghasemzadeh*
 
 This project is licensed under the **GNU Affero General Public License v3.0 (AGPLv3)**.
 
