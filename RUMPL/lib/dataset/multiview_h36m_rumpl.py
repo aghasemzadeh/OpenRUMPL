@@ -1,0 +1,448 @@
+# ------------------------------------------------------------------------------
+# Copyright (c) 2024 UCLouvain. All rights reserved.
+# Licensed under the GNU Affero General Public License v3.0 (AGPLv3).
+#
+# Author: Seyed Abolfazl Ghaemzadeh, ICTEAM, UCLouvain
+# ------------------------------------------------------------------------------
+#
+# Portions of this file are:
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+# Written by Chunyu Wang (chnuwa@microsoft.com)
+# ------------------------------------------------------------------------------
+
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+
+import os.path as osp
+import numpy as np
+import pickle
+import collections
+import random
+from utils.calib import smart_pseudo_remove_weight
+from utils.calib import *
+
+from dataset.joints_dataset_rumpl import JointsDataset_RUMPL
+import logging
+import json
+import torch
+from multiviews.triangulate import triangulate_poses
+
+
+logger = logging.getLogger(__name__)
+
+# # set random seed
+# np.random.seed(0)
+# random.seed(0)
+
+class MultiViewH36M_RUMPL(JointsDataset_RUMPL):
+
+    def __init__(self, cfg, image_set, is_train, transform=None, is_mmpose=False):
+        super().__init__(cfg, image_set, is_train, transform)
+        self.num_joints = 17
+        # self.actual_joints = {
+        #     0: 'neck',
+        #     1: 'nose',
+        #     2: 'root',
+        #     3: 'lsho',
+        #     4: 'lelb',
+        #     5: 'lwri',
+        #     6: 'lhip',
+        #     7: 'lkne',
+        #     8: 'lank',
+        #     9: 'rsho',
+        #     10: 'relb',
+        #     11: 'rwri',
+        #     12: 'rhip',
+        #     13: 'rkne',
+        #     14: 'rank',
+        #     15: 'head',
+        #     16: 'belly',
+        #     # 15: 'leye',
+        #     # 16: 'lear',
+        #     # 17: 'reye',
+        #     # 18: 'rear'
+        # }
+        self.actual_joints = {
+            0: 'root',
+            1: 'rhip',
+            2: 'rkne',
+            3: 'rank',
+            4: 'lhip',
+            5: 'lkne',
+            6: 'lank',
+            7: 'belly',
+            8: 'neck',
+            9: 'nose',
+            10: 'head',
+            11: 'lsho',
+            12: 'lelb',
+            13: 'lwri',
+            14: 'rsho',
+            15: 'relb',
+            16: 'rwri'
+        }
+        self.keypoints_inverse_dict = {v: k for k, v in self.actual_joints.items()}
+        self.camera_manual_order = cfg.DATASET.CAMERA_MANUAL_ORDER
+        print('camera_manual_order',self.camera_manual_order)
+        self.val_on_train = cfg.DATASET.VAL_ON_TRAIN
+        self.is_train = is_train
+            
+        
+        self.use_mmpose = False
+        if is_mmpose:
+            self.use_mmpose = True
+        else:
+            if cfg.DATASET.USE_MMPOSE_TRAIN and is_train:
+                self.use_mmpose = True
+            elif (cfg.DATASET.USE_MMPOSE_VAL or cfg.DATASET.USE_MMPOSE_TEST) and not is_train:
+                self.use_mmpose = True
+            
+        if self.h36m_old_datasets:
+            dataset_path = osp.join(self.root, 'h36m', 'annot')
+            if self.use_mmpose:
+                dataset_path = osp.join(self.root, 'h36m', 'annot_mmpose')
+        else:
+            dataset_folder_name = 'datasets_mmpose' if self.use_mmpose else 'datasets' 
+            dataset_folder_name = 'datasets_mmpose_depth' if self.use_depth else dataset_folder_name
+            dataset_folder_name_2 = self.h36m_dataset_name + '_' + self.mmpose_type if self.use_mmpose else self.h36m_dataset_name
+            dataset_folder_name_2 = dataset_folder_name_2 + '_' + self.depth_type if self.use_depth else dataset_folder_name_2
+            dataset_path = osp.join(self.root, 'h36m', 'data', dataset_folder_name, dataset_folder_name_2)
+        if cfg.DATASET.CROP:
+            anno_file = osp.join(dataset_path, 'h36m_{}.pkl'.format(image_set))
+        else:
+            anno_file = osp.join(dataset_path, 'h36m_{}_uncrop.pkl'.format(image_set))
+
+        self.db = self.load_db(anno_file)
+        if not cfg.DATASET.WITH_DAMAGE:
+            print('before filter', len(self.db))
+            self.db = [db_rec for db_rec in self.db if not self.isdamaged(db_rec)]
+            print('after filter', len(self.db))
+        
+        self.db = self.make_cameras_compatible(self.db)
+        if self.only_keep_inside_room:
+            self.db_ = []
+            for i, db_rec in enumerate(self.db):
+                joints_3d_camera = db_rec['joints_3d_camera'].copy()      # (17, 3) in camera coordinate
+                camera = db_rec['camera'].copy()  
+                joints_3d = cam_to_world(joints_3d_camera[None], camera['R'], camera['t']).squeeze()  # (17, 3) in world coordinate
+                if self.output_in_meter:
+                    joints_3d = joints_3d / 1000
+                if self.room_min_x < joints_3d[0, 0] < self.room_max_x and self.room_min_y < joints_3d[0, 1] < self.room_max_y:
+                    self.db_.append(db_rec)
+            self.db = self.db_
+        if self.only_keep_if_in_calibs_actors:
+            # only keep the data that is in the calibs
+            # self.h36m_calib_actors_val
+            self.db_ = []
+            for i, db_rec in enumerate(self.db):
+                if db_rec['subject'] in self.h36m_calib_actors:
+                    self.db_.append(db_rec)
+            self.db = self.db_
+                
+
+        self.u2a_mapping = super().get_mapping()
+        super().do_mapping()
+
+        self.grouping = self.get_group(self.db)
+        self.group_size = len(self.grouping)
+        
+        logger.info('=> {} load {} samples'.format(image_set, self.group_size))
+        
+        if self.use_cmu_cameras_on_h36m:
+            cmu_calibs = self.cmu_calibs_train if is_train else self.cmu_calibs_val
+            if isinstance(cmu_calibs, str):
+                cmu_calibs = [cmu_calibs]
+            self.cmu_cameras = self.load_all_cameras_cmu(cmu_calibs)
+            
+            self.cmu_cameras = {view: v for view, v in self.cmu_cameras.items() if view in self.views}
+            self.n_all_cameras = len(self.cmu_cameras)    
+            self.all_camera_ids = list(self.cmu_cameras.keys())
+            self.n_camera_setups = len(self.cmu_cameras[self.all_camera_ids[0]])
+        
+        
+        self.R_noise_value = cfg.DATASET.R_NOISE_VALUE
+        self.T_noise_value = cfg.DATASET.T_NOISE_VALUE
+        if cfg.DATASET.APPLY_NOISE_CAMERAS and self.is_train:
+            self.add_noise_to_cameras()
+            
+    def make_cameras_compatible(self, db):
+        for data in db:
+            camera = data['camera']
+            if 'K' not in camera.keys():
+                camera['fx'] = camera['fx'][0] 
+                camera['fy'] = camera['fy'][0]
+                camera['cx'] = camera['cx'][0]
+                camera['cy'] = camera['cy'][0]
+                camera['K'] = np.array([[camera['fx'], 0, camera['cx']]
+                                        ,[0, camera['fy'], camera['cy']]
+                                    ,[0, 0, 1]])    
+                camera['t'] = - np.linalg.inv(camera['R'].T) @ camera['T']
+            
+        return db
+    
+    
+        
+    def add_noise_to_camera(self, camera):
+        # add noise to camera params
+        camera['R'] = camera['R'] + np.random.normal(0, 1.0, camera['R'].shape) * self.R_noise_value
+        camera['T'] = camera['T'] + np.random.normal(0, 1.0, camera['T'].shape) * self.T_noise_value
+        return camera
+        
+    def add_noise_to_cameras(self):
+        # add noise to cameras
+        for db_rec in self.db:
+            db_rec['camera'] = self.add_noise_to_camera(db_rec['camera'])
+
+    def index_to_action_names(self):
+        return {
+            2: 'Direction',
+            3: 'Discuss',
+            4: 'Eating',
+            5: 'Greet',
+            6: 'Phone',
+            7: 'Photo',
+            8: 'Pose',
+            9: 'Purchase',
+            10: 'Sitting',
+            11: 'SittingDown',
+            12: 'Smoke',
+            13: 'Wait',
+            14: 'WalkDog',
+            15: 'Walk',
+            16: 'WalkTwo'
+        }
+
+    def load_db(self, dataset_file):
+        with open(dataset_file, 'rb') as f:
+            dataset = pickle.load(f)
+            return dataset
+
+    def get_group(self, db):
+        grouping = {}
+        nitems = len(db)
+        if self.use_cmu_cameras_on_h36m:
+            views = [1, 2, 3, 4]
+            CAM_IX = {x-1: i for i, x in enumerate(views[:self.n_views])}
+        elif self.run_on_all_cameras:
+            views = [1, 2, 3, 4]
+            CAM_IX = {x-1: i for i, x in enumerate(views)}
+        else:
+            views = self.views
+            CAM_IX = {x-1: i for i, x in enumerate(self.views)}
+        for i in range(nitems):
+            keystr = self.get_key_str(db[i])
+            try:
+                camera_id = CAM_IX[db[i]['camera_id']]
+            except KeyError:
+                continue
+            if keystr not in grouping:
+                grouping[keystr] = [-1] * len(views)
+            grouping[keystr][camera_id] = i
+            
+        filtered_grouping = []
+        if self.run_on_all_cameras:
+            view_combinations = self.generate_combinations(views, self.n_views)
+            for _, v in grouping.items():
+                for view_comb in view_combinations:
+                    if np.all(np.array([v[CAM_IX[view-1]] for view in view_comb]) != -1):
+                        filtered_grouping.append([v[CAM_IX[view-1]] for view in view_comb])
+        else:
+            for _, v in grouping.items():
+                if np.all(np.array(v) != -1):
+                    filtered_grouping.append(v)
+                
+        if self.use_cmu_cameras_on_h36m and len(filtered_grouping) > 0:
+            n_views_to_add = self.n_views - len(filtered_grouping[0])
+            for i, group in enumerate(filtered_grouping):
+                for j in range(n_views_to_add):
+                    filtered_grouping[i].append(-1)
+                
+        if self.filter_groupings:
+            if self.is_train:
+                filtered_grouping = filtered_grouping[::5]
+            else:
+                filtered_grouping = filtered_grouping[::64]
+            
+        if self.train_n_samples is not None and self.is_train:
+            filtered_grouping = filtered_grouping[:self.train_n_samples]
+        if self.test_n_samples is not None and not self.is_train:
+            filtered_grouping = filtered_grouping[:self.test_n_samples]
+
+        return filtered_grouping
+
+    def __getitem__(self, idx):
+        input, target, weight, meta = [], [], [], []
+        items = self.grouping[idx]
+        
+        if self.normalize_room:
+            room_x_scale = self.room_max_x - self.room_min_x
+            room_y_scale = self.room_max_y - self.room_min_y
+            room_z_scale = self.room_max_z - self.room_min_z
+            room_center = np.array([(self.room_max_x + self.room_min_x) / 2, (self.room_max_y + self.room_min_y) / 2, (self.room_max_z + self.room_min_z) / 2])
+        
+        camera_setup_to_use = None
+        if self.use_cmu_cameras_on_h36m:    
+            camera_setup_to_use = np.random.random_integers(0, self.n_camera_setups-1)
+            camera_ids = np.array(self.views)
+        
+        shift_room_tri = None
+        if self.shift_room:
+            if type(self.shift_room_value) == str:
+                if self.shift_room_value in ['to_avg_pose', 'to_conf_kp']:
+                    cameras_tri = [self.db[x]['camera'].copy() for x in items]
+                    if 'k' not in cameras_tri[0].keys():
+                        for cam in cameras_tri:
+                            cam['k'] = [cam['distCoef'][0], cam['distCoef'][1], cam['distCoef'][4]]
+                            cam['p'] = [cam['distCoef'][2], cam['distCoef'][3]]
+                    loc_2d = np.array([self.db[x]['joints_2d'] for x in items])
+                    if self.use_mmpose:
+                        conf_2d = np.array([self.db[x]['joints_2d_conf'] for x in items])
+                    else:
+                        conf_2d = np.ones((len(items), self.num_joints))
+                    # conf_mmpose_2d = np.array([self.db[x]['joints_2d_conf'] for x in items])
+                    joints_3d_tri = triangulate_poses(cameras_tri, loc_2d, conf_2d)
+                    confs = np.min(conf_2d, axis=0).reshape(-1)
+                    if self.shift_room_value == 'to_avg_pose':
+                        shift_room_tri = - np.average(joints_3d_tri.squeeze(), weights=confs, axis=0).reshape(-1)
+                    elif self.shift_room_value == 'to_conf_kp':
+                        shift_room_tri = - joints_3d_tri[0, np.argmax(confs)]
+                
+        # directions, intersections, joints_2d_confs = [], [], []
+        directions, intersections, joints_2d_confs, joints_2ds, camera_params, depths = [], [], [], [], [], []
+        
+        
+        for ix, item in enumerate(items):
+            camera_id = None
+            if self.use_h36m_cameras_on_cmu or self.use_cmu_cameras_on_cmu:
+                camera_id = camera_ids[ix]
+            # direction, intersection, joints_2d_conf, joints_3d, meta = self.get_rays(item, camera_id, camera_setup_to_use, shift_room_tri=shift_room_tri)
+            direction, intersection, joints_2d_conf, joints_3d, meta, joints_2d, K, Rt, depth_vals = self.get_rays(item, camera_id, camera_setup_to_use, shift_room_tri=shift_room_tri)
+            directions.append(direction)
+            intersections.append(intersection)
+            joints_2d_confs.append(joints_2d_conf)
+            joints_2ds.append(joints_2d)
+            camera_params.append(np.concatenate([K.flatten(), Rt.flatten()]))
+            depths.append(depth_vals.reshape(-1, 1)) if depth_vals is not None else depths.append(None)
+
+            
+        directions = np.array(directions)           # (n_views, 17, 3)
+        intersections = np.array(intersections)     # (n_views, 17, 3)
+        joints_2d_confs = np.array(joints_2d_confs)     # (n_views, 17, 1)
+        joints_2ds = np.array(joints_2ds)     # (n_views, 17, 2)
+        camera_params = np.array(camera_params)     # (n_views, 12)
+        camera_params = np.repeat(camera_params[:, None, :], self.num_joints, axis=1)   # (n_views, 17, 12)
+        depths = np.array(depths) if depths[0] is not None else None
+        joints_2ds = np.concatenate([joints_2ds, camera_params], axis=2)   # (n_views, 17, 14)
+        
+        
+        directions = np.transpose(directions, (1, 0, 2))   # (17, n_views, 3)
+        intersections = np.transpose(intersections, (1, 0, 2))   # (17, n_views, 3)
+        joints_2d_confs_ = np.transpose(joints_2d_confs, (1, 0, 2))   # (17, n_views, 1)
+        joints_2ds = np.transpose(joints_2ds, (1, 0, 2))   # (17, n_views, 2)
+        # camera_params = np.transpose(camera_params, (1, 0))   # (17, n_views)
+        depths = np.transpose(depths, (1, 0, 2)) if depths is not None else None
+        
+        
+        # do logical and on joints_2d_confs on axis 1
+        joints_2d_confs = np.where(joints_2d_confs_ > self.kp_visiblity_th, 1, 0)
+        joints_2d_confs = np.all(joints_2d_confs, axis=1, keepdims=True)   # (17, 1, 1)
+        
+        closest_points_all = []
+        for direction, intersection in zip(directions, intersections):
+            closest_points = closest_points_on_n_skew_lines(intersection, direction)    # (n_views, 3)
+            closest_points_all.append(closest_points)
+        closest_points_all = np.array(closest_points_all)   # (17, n_views, 3)
+        
+        middle_points = closest_points_all.mean(axis=1, keepdims=True)   # (17, 1, 3)
+        middle_points *= joints_2d_confs                                 # (17, 1, 3)
+        
+        
+        if self.normalize_room:
+            middle_points = self.normalize_pose3d_coordinates(middle_points, room_center, room_x_scale, room_y_scale, room_z_scale)
+            closest_points_all = self.normalize_pose3d_coordinates(closest_points_all, room_center, room_x_scale, room_y_scale, room_z_scale)
+            joints_3d = self.normalize_pose3d_coordinates(joints_3d, room_center, room_x_scale, room_y_scale, room_z_scale)
+            directions = self.normalize_pose3d_coordinates(directions, room_center, room_x_scale, room_y_scale, room_z_scale)
+            intersections = self.normalize_pose3d_coordinates(intersections, room_center, room_x_scale, room_y_scale, room_z_scale)
+            
+            meta['room_scaled'] = True
+            meta['room_x_scale'] = max(room_x_scale, room_y_scale, room_z_scale)
+            meta['room_y_scale'] = max(room_x_scale, room_y_scale, room_z_scale)
+            meta['room_z_scale'] = max(room_x_scale, room_y_scale, room_z_scale)
+            meta['room_center'] = room_center
+            meta['room_scaled_equal'] = True
+            
+        joints_3d = torch.from_numpy(joints_3d).float()
+        middle_points = torch.from_numpy(middle_points).float()
+        closest_points_all = np.concatenate([closest_points_all, joints_2d_confs_], axis=2)  # (17, n_views, 4)        
+        closest_points_all = torch.from_numpy(closest_points_all).float()
+        rays = np.concatenate([directions, intersections, joints_2d_confs_], axis=2)   # (17, n_views, 6)
+        if self.use_depth:
+            rays = np.concatenate([rays, depths], axis=2)
+        joints_2ds = np.concatenate([joints_2ds, joints_2d_confs_], axis=2)
+        joints_2ds = torch.from_numpy(joints_2ds).float()
+        # depths = torch.from_numpy(depths).float() if depths is not None else None
+        
+        # camera_params = torch.from_numpy(camera_params).float()
+        if self.zero_tokens_for_missing_joints:
+            rays *= joints_2d_confs
+            closest_points_all *= joints_2d_confs
+            joints_2ds *= joints_2d_confs
+            # camera_params *= joints_2d_confs
+        rays = torch.from_numpy(rays).float()
+        
+        if self.shift_room:
+            if type(self.shift_room_value) == str:
+                if self.shift_room_value in ['to_avg_pose', 'to_conf_kp']:
+                    meta['shift_room_tri'] = shift_room_tri
+            
+        return middle_points, closest_points_all, joints_3d, rays, meta, joints_2ds
+        
+        for ix, item in enumerate(items):
+            camera_id = None
+            if self.use_cmu_cameras_on_h36m:
+                camera_id = camera_ids[ix]
+            i, t, w, m = super().__getitem__(item, camera_id, camera_setup_to_use)
+            if self.normalize_room:
+                t[:, 0] = t[:, 0] / room_x_scale
+                t[:, 1] = t[:, 1] / room_y_scale
+                m['rays'][:, 0] = m['rays'][:, 0] / room_x_scale
+                m['rays'][:, 1] = m['rays'][:, 1] / room_y_scale
+                m['cam_center'][:, 0] = m['cam_center'][:, 0] / room_x_scale
+                m['cam_center'][:, 1] = m['cam_center'][:, 1] / room_y_scale
+                m['room_scaled'] = True
+                m['room_x_scale'] = room_x_scale
+                m['room_y_scale'] = room_y_scale
+            input.append(i)
+            target.append(t)
+            weight.append(w)
+            meta.append(m)
+        if self.APPLY_SMART_PSEUDO_TRAINING and self.is_train:
+            weight = smart_pseudo_remove_weight(target, weight, meta, self.epipolar_error_threshold)
+        if 'camera' in meta[0].keys():
+            for m in meta:
+                del m['camera']
+                del m['joints_2d_conf']
+        return input, target, weight, meta
+
+    def __len__(self):
+        return self.group_size
+
+    def get_key_str(self, datum):
+        return 's_{:02}_act_{:02}_subact_{:02}_imgid_{:06}'.format(
+            datum['subject'], datum['action'], datum['subaction'],
+            datum['image_id'])
+        
+    def isdamaged(self, db_rec):
+        # from https://github.com/yihui-he/epipolar-transformers/blob/4da5cbca762aef6a89d37f889789f772b87d2688/data/datasets/joints_dataset.py#L174
+        #damaged seq
+        #'Greeting-2', 'SittingDown-2', 'Waiting-1'
+        if db_rec['subject'] == 9:
+            if db_rec['action'] != 5 or db_rec['subaction'] != 2:
+                if db_rec['action'] != 10 or db_rec['subaction'] != 2:
+                    if db_rec['action'] != 13 or db_rec['subaction'] != 1:
+                        return False
+        else:
+            return False
+        return True
