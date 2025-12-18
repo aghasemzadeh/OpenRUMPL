@@ -2,7 +2,7 @@
 
 **RUMPL: Ray-Based Transformers for Universal Multi-View 2D to 3D Human Pose Lifting**
 
-[![Paper](https://img.shields.io/badge/Paper-Arxiv-red)](LINK_TO_YOUR_PAPER_HERE)
+[![Paper](https://img.shields.io/badge/Paper-Arxiv-red)](https://arxiv.org/abs/2512.15488)
 
 Hi there! 👋 Welcome to the official repository for **RUMPL**. We are excited to have you here. This framework is designed to help you with 3D pose estimation and motion learning using the power of your dataset.
 
