@@ -115,10 +115,10 @@ If you have questions, run into bugs, or just want to say hi, feel free to **[op
 
 If you find this code useful for your research, please consider citing our paper:
 
-<!-- ```bibtex
-@article{Ghasemzadeh2025RUMPL,
+```bibtex
+@article{ghasemzadeh2025rumpl,
   title={RUMPL: Ray-Based Transformers for Universal Multi-View 2D to 3D Human Pose Lifting},
-  author={Your Name and Co-authors},
-  journal={Arxiv},
-  year={2024}
-} -->
+  author={Ghasemzadeh, Seyed Abolfazl and Alahi, Alexandre and De Vleeschouwer, Christophe},
+  journal={arXiv preprint arXiv:2512.15488},
+  year={2025}
+}
