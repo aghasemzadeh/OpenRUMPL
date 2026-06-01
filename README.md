@@ -2,11 +2,17 @@
 
 **RUMPL: Ray-Based Transformers for Universal Multi-View 2D to 3D Human Pose Lifting**
 
-[![Paper](https://img.shields.io/badge/Paper-Arxiv-red)](https://arxiv.org/abs/2512.15488)
+[![Paper](https://img.shields.io/badge/Paper-IEEE_TIP-blue)](https://ieeexplore.ieee.org/document/11534395)
+[![Arxiv](https://img.shields.io/badge/Paper-Arxiv-red)](https://arxiv.org/abs/2512.15488)
 
-Hi there! 👋 Welcome to the official repository for **RUMPL**. We are excited to have you here. This framework is designed to help you with 3D pose estimation and motion learning using the power of your dataset.
+Hi there! 👋 Welcome to the official repository for **RUMPL**. We are excited to share that our paper has been accepted to **IEEE Transactions on Image Processing (TIP)**! 
 
-Below is everything you need to get set up and running smoothly. Let's dive in! 🏊‍♂️
+This framework is designed to help you with 3D pose estimation and motion learning using the power of your dataset. Below is everything you need to get set up and running smoothly. Let's dive in! 🏊‍♂️
+
+---
+
+## 📢 News
+* **[2026]** RUMPL has been accepted to **IEEE Transactions on Image Processing (TIP)**. You can find the updated citation details below.
 
 ---
 ## 🛠️ Installation
@@ -116,9 +122,13 @@ If you have questions, run into bugs, or just want to say hi, feel free to **[op
 If you find this code useful for your research, please consider citing our paper:
 
 ```bibtex
-@article{ghasemzadeh2025rumpl,
-  title={RUMPL: Ray-Based Transformers for Universal Multi-View 2D to 3D Human Pose Lifting},
+@ARTICLE{11534395,
   author={Ghasemzadeh, Seyed Abolfazl and Alahi, Alexandre and De Vleeschouwer, Christophe},
-  journal={arXiv preprint arXiv:2512.15488},
-  year={2025}
-}
+  journal={IEEE Transactions on Image Processing}, 
+  title={RUMPL: Ray-Based Transformers for Universal Multi-View 2D to 3D Human Pose Lifting}, 
+  year={2026},
+  volume={35},
+  number={},
+  pages={5509-5522},
+  keywords={Cameras;Training;Modeling;Transformers;Testing;Computer vision;Computers;Conferences;Pose estimation;Learning (artificial intelligence);Multi-view;3D human pose estimation;ray representation;transformer;generalization},
+  doi={10.1109/TIP.2026.3694127}}
